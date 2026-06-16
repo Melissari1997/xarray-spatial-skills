@@ -1,0 +1,13 @@
+# Runtime artifacts produced by AI-assistant tooling — never versioned here.
+.claude/worktrees/
+.claude/scheduled_tasks.lock
+.claude/settings.local.json
+.codex/worktrees/
+.codex/scheduled_tasks.lock
+.kilo/worktrees/
+
+# Sweep audit-progress state (runtime, repo-specific)
+sweep-*-state.csv
+.claude/sweep-*-state.csv
+.codex/sweep-*-state.csv
+.kilo/sweep-*-state.csv
