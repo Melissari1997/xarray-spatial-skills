@@ -1,14 +1,14 @@
 # Deep Sweep: Run every sweep-* command focused on a single module
 
-Pick one xrspatial module and dispatch every sweep-* command at it in
+Pick one xrspatial module and dispatch every `sweep-*` command at it in
 parallel. Each sub-sweep follows the audit template embedded in its own
-`.kilo/command/sweep-*.md` file, runs rockout for HIGH/MEDIUM findings
+`.kilo/command/sweep-*.md` file, runs `rockout` for HIGH/MEDIUM findings
 when the sweep specifies it, and updates its own
 `.kilo/worktrees/sweep-{type}-state.csv` row for the target module.
 
 New sweeps are picked up automatically. Drop a
 `.kilo/command/sweep-XYZ.md` into the workflows directory and the next
-deep-sweep run will dispatch it alongside the others.
+`deep-sweep` run will dispatch it alongside the others.
 
 Required first argument: the module name (e.g. `geotiff`, `slope`, `hydro`).
 Optional flags: {{ARGUMENTS}}
@@ -42,7 +42,7 @@ Then parse flags (multiple may combine):
 |------|--------|
 | `--only-sweep s1,s2` | Only dispatch the named sweeps. Names are the suffix after `sweep-` (e.g. `security`, `performance`, `api-consistency`). |
 | `--exclude-sweep s1,s2` | Skip the named sweeps. |
-| `--no-fix` | Pass `--no-fix` semantics to every dispatched sweep: subagent audits only, no rockout, no PR. State CSV is still updated. |
+| `--no-fix` | Pass `--no-fix` semantics to every dispatched sweep: subagent audits only, no `rockout`, no PR. State CSV is still updated. |
 | `--reset-state` | Before dispatching, delete the target module's row from every `.kilo/worktrees/sweep-*-state.csv` so the audit is treated as never-inspected. Do NOT delete other modules' rows. |
 
 ## Step 1 -- Validate the module
@@ -56,11 +56,13 @@ Determine the module's files under `xrspatial/`:
   available top-level `.py` files and subpackage directories under
   `xrspatial/` so the user can correct the name.
 
-Skip names that the individual sweeps already exclude from their discovery:
-`__init__`, `_version`, `__main__`, `utils`, `accessor`, `preview`,
-`dataset_support`, `diagnostics`, `analytics`. If the user passes one of
-these, stop and explain that these modules are not in scope for the
-per-module sweeps.
+Skip names that the individual sweeps already exclude from their discovery
+(the single-file exclusion list in `.kilo/command/_sweep-common.md`:
+`__init__`, `_version`, `__main__`, `_template_data`, `templates`, `utils`,
+`accessor`, `preview`, `dataset_support`, `diagnostics`, `analytics`,
+`validate`, plus the `tests`, `datasets`, `experimental` directories). If
+the user passes one of these, stop and explain that these modules are not
+in scope for the per-module sweeps.
 
 ## Step 2 -- Discover sweep commands
 
@@ -68,6 +70,12 @@ List all files matching `.kilo/command/sweep-*.md`. For each, the sweep
 name is the basename without `sweep-` prefix and `.md` suffix
 (e.g. `.kilo/command/sweep-security.md` → `security`). Build the list
 in sorted order so the dispatch table is deterministic.
+
+Exclude `_sweep-common.md` if the glob picked it up (it is shared
+machinery, not a sweep). Also exclude any sweep whose file contains the
+marker line `Deep-sweep scope: library-wide` — those sweeps do not audit
+per-module and cannot be dispatched at a single module (currently
+`sweep-dependencies`).
 
 Apply `--only-sweep` / `--exclude-sweep` filters. If the resulting list is
 empty, stop and report which filters eliminated everything.
@@ -95,6 +103,13 @@ it needs; the union below covers all current sweeps):
 | **has_shared_memory** | grep file(s) for `cuda.shared.array` |
 | **has_dask_backend** | grep file(s) for `_run_dask`, `map_overlap`, `map_blocks` |
 | **has_cuda_backend** | grep file(s) for `@cuda.jit`, `import cupy` |
+| **public_funcs** | count of public functions exported for this module in `xrspatial/__init__.py` (fallback: `grep -cE '^def [a-z]' <files>`) |
+| **example_blocks** | `grep -c '>>>' <files>` (sum for subpackages) |
+| **test_loc** | `wc -l < xrspatial/tests/test_<module>.py` (or 0 if absent) |
+| **branch_cov** | measured branch-coverage percent per sweep-test-coverage.md Step 1 (0 if no test file) |
+| **flake8_baseline** | `flake8 <module_files> 2>&1 \| wc -l` |
+| **has_existing_bench** | a file matching the module name exists in `benchmarks/benchmarks/` |
+| **is_io_module** | module is geotiff or reproject |
 
 Also detect CUDA availability once:
 
@@ -257,11 +272,15 @@ suffixes like `deep-sweep-{sweep_name}-{module}-{today}-01`,
 ## Bootstrapping steps (after ISO-1 / ISO-2 pass)
 
 1. Read the sweep definition: {sweep_file}
+   Also read .kilo/command/_sweep-common.md — the sweep templates
+   reference it for the state-CSV read/update/write pattern, the severity
+   rubric, the repro gate, and the agent contract they include verbatim.
 
-   Inside it, locate the "subagent prompt template" (a fenced block under
-   a heading like "Step 5b" or "Step 3b" titled "Launch subagents"). That
-   block is what an individual sweep dispatches to its own audit workers.
-   You are going to act as that worker for module "{module}".
+   Inside the sweep file, locate the "subagent prompt template" (a fenced
+   block under a heading like "Step 5b" or "Step 3b" titled "Launch
+   subagents"). That block is what an individual sweep dispatches to its
+   own audit workers. You are going to act as that worker for module
+   "{module}".
 
 2. Pre-collected metadata for "{module}":
 
@@ -276,6 +295,13 @@ suffixes like `deep-sweep-{sweep_name}-{module}-{today}-01`,
    - has_shared_memory  : {has_shared_memory}
    - has_dask_backend   : {has_dask_backend}
    - has_cuda_backend   : {has_cuda_backend}
+   - public_funcs       : {public_funcs}
+   - example_blocks     : {example_blocks}
+   - test_loc           : {test_loc}
+   - branch_cov         : {branch_cov}
+   - flake8_baseline    : {flake8_baseline}
+   - has_existing_bench : {has_existing_bench}
+   - is_io_module       : {is_io_module}
    - CUDA_AVAILABLE     : {cuda_available}
 
    Use only the fields the sweep's template actually references. Ignore
@@ -380,7 +406,7 @@ name, state-commit SHA). Then verify:
    before deep-sweep started (capture it in Step 0 as
    `DEEP_SWEEP_START_BRANCH`). The porcelain output should contain no
    commits or modifications introduced by sweep agents (a still-untracked
-   `.claude/commands/*.md` from the current session is fine; new commits
+   `.kilo/command/*.md` from the current session is fine; new commits
    on the current branch from a sweep agent are NOT).
 
 If any of (1)-(4) fails, print a clearly-labeled
@@ -433,6 +459,6 @@ inspect or push them.
   (never inspected before), that is fine -- the subagents will create the
   first row.
 - deep-sweep is not for triaging the whole codebase. For that, run the
-  individual sweep-* commands; they score and pick the highest-priority
+  individual `sweep-*` commands; they score and pick the highest-priority
   modules. Use deep-sweep when you already know which module needs a
   full-spectrum audit.

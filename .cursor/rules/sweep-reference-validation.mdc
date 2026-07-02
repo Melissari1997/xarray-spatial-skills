@@ -1,0 +1,35 @@
+---
+description: "Validate xrspatial algorithms against reference implementations (gdaldem, scipy.ndimage, richdem, WhiteboxTools) on shared synthetic inputs; divergence becomes an accuracy fix, parity becomes a golden-value regression test"
+globs: "*.py"
+---
+
+# Sweep Reference Validation: Algorithm Parity with Trusted GIS Tools
+
+Validate xrspatial algorithms against independent reference implementations on shared synthetic inputs -- the strongest correctness signal: not "the backends agree with each other" but "the algorithm agrees with the tools the GIS community already trusts."
+
+## Reference map
+
+- slope, aspect, hillshade, terrain_metrics: gdaldem
+- curvature, hydro: richdem / WhiteboxTools
+- focal, convolution, morphology, edge_detection, proximity, zonal: scipy.ndimage
+- reproject: rioxarray / GDAL warp
+
+Modules with no practical reference (perlin, worley, viewshed, glcm, ...) are skipped. Probe tool availability first; skip comparisons whose tool is missing and note `<tool>-unavailable` in state notes. Never install reference tools.
+
+## Process
+
+1. Read the module and identify from docstrings/References which published algorithm it claims to implement (e.g. Horn 1981 slope) -- that decides the reference mode to compare against.
+2. Build 3 synthetic inputs as GeoTIFF + DataArray pairs so both tools read identical data: a 64x64 Gaussian hill with realistic cellsize, a tilted plane (analytic ground truth), and a rough random surface.
+3. Run xrspatial and each available reference on the same inputs. Compare interior pixels first (edge conventions legitimately differ), then edges. Record an explicit tolerance (start rtol=1e-6 for float64). Where analytic truth exists, compare against the math too -- both tools agreeing with each other but not the math is two bugs, not zero.
+4. Classify the verdict: MATCHES (within tolerance), CONVENTION-DIFF (delta fully explained by a documented convention difference -- verify quantitatively by applying the convention transform), DIVERGES (unexplained disagreement), or NO-REFERENCE.
+5. Fix paths:
+   - DIVERGES: file and fix an accuracy issue; the comparison script IS the reproduction. HIGH if realistic inputs diverge; CRITICAL if analytic truth shows xrspatial is wrong on a public API.
+   - MATCHES with no existing golden test: add a golden-value regression test pinning the parity (hardcoded expected values, comment naming the reference tool + version). Test-only PR.
+   - CONVENTION-DIFF with undocumented convention: doc-only fix stating the convention and matching reference flags.
+6. Update the state CSV file (verdict and tolerance columns; record reference tool versions in notes).
+
+## General rules
+
+- Compare like with like: same nodata handling, dtype, cellsize units. A comparison harness bug is not a finding.
+- Run comparisons against the numpy backend; if CUDA is available, first confirm cupy matches numpy (backend parity is a prerequisite for reference parity).
+- If root-causing shows the reference tool is the wrong one, document the analytic evidence and file a doc issue instead.

@@ -1,0 +1,35 @@
+---
+description: "Audit xrspatial modules for input validation and error-message quality: missing _validate_raster, unactionable messages, silent failure modes, inconsistent exception contracts, swallowed errors"
+globs: "*.py"
+---
+
+# Sweep Error Handling: Input Validation and Error-Message Quality Audit
+
+Audit xrspatial modules for the failure-path user experience. Production users judge a library by its worst error message. _validate_raster() in utils.py is the project's validation convention; deviations from it are the findings.
+
+## Categories to audit
+
+1. **Missing input validation**: public function skips _validate_raster (or equivalent) so malformed input reaches the compute kernel and crashes deep in numba/dask with an inscrutable traceback, validation missing a case the kernel assumes (dims but not dtype), validation after expensive work (fail late instead of fail fast).
+
+2. **Unactionable error messages**: raised message omits what was wrong and what was expected (no offending value, dtype, shape, or parameter name), error raised deep in a helper so the traceback points at internals, message misleading about the actual cause.
+
+3. **Silent failure modes**: bad input produces plausible-looking garbage with no exception or warning (CRITICAL -- the worst production failure), out-of-domain parameter silently clamped or ignored, undocumented NaN-poisoned output.
+
+4. **Inconsistent exception contracts**: same error class raising TypeError in one sibling function and ValueError in another, one function raising while its sibling returns None for the same bad input, message format drifting from _validate_raster's convention.
+
+5. **Swallowed errors**: bare except: or except Exception: that suppresses and continues, exception re-raised as a different type losing context (no `from e`), exception logged but function returns a partial result as if it succeeded.
+
+## Process
+
+1. Read the module files, utils.py (especially _validate_raster), and the matching tests (error-path tests tell you which behaviors are intentional).
+2. Execute the failure paths -- do not flag from reading alone. Call each public function with a bad-input battery on numpy (and dask+numpy where a dask path exists): plain numpy array instead of DataArray, wrong dimensionality, integer dtype where float is assumed, no coords/res attr, NaN-filled and zero-size inputs, out-of-domain parameters. The observed exception type, message text, or silent garbage is the evidence.
+3. Audit for the 5 categories. Only flag issues actually observed.
+4. Assign severity + file:line. The bad-input battery satisfies the repro gate -- paste call, observed, and expected behavior into the issue.
+5. If any CRITICAL, HIGH, or MEDIUM issue found, fix it end-to-end; include an error-path test asserting the new exception type and message. Changing an exception TYPE on a public function is breaking -- prefer keeping the type while fixing the message.
+6. Update the state CSV file.
+
+## General rules
+
+- Intentional permissiveness documented in the docstring (e.g. "NaN cells are ignored") is not a finding; undocumented permissiveness is.
+- Do not add validation so strict it breaks currently-working documented usage; the tests must keep passing.
+- Error behavior should not differ by backend; spot-check cupy inputs when CUDA is available.

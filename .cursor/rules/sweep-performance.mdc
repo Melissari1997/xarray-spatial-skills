@@ -1,5 +1,5 @@
 ---
-description: "Audit xrspatial modules for performance bottlenecks, OOM risk under 30TB dask workloads, and backend-specific anti-patterns"
+description: "Audit xrspatial modules for performance bottlenecks, OOM risk under 30TB dask workloads, and backend-specific anti-patterns; HIGH fixes must add asv benchmarks"
 globs: "*.py"
 ---
 
@@ -19,20 +19,20 @@ Audit xrspatial modules for performance bottlenecks, OOM risk, and backend-speci
 
 5. **Numba anti-patterns**: missing @ngjit on nested for-loops over .data arrays, @jit without nopython=True, type instability, column-major iteration on row-major arrays.
 
-6. **30TB / 16GB OOM verdict**: For each dask code path, follow it end-to-end. Decide whether peak memory scales with chunk size or with the full array. Verdict: SAFE, RISKY, WILL OOM, or N/A.
+6. **30TB / 16GB OOM verdict**: For each dask code path, follow it end-to-end. Decide whether peak memory scales with chunk size or with the full array; optionally construct the dask task graph (never .compute()) and inspect task count. Verdict: SAFE, RISKY, WILL OOM, or N/A.
 
 ## Process
 
 1. Read the module files, utils.py, and general_checks.py.
 2. Audit for the 6 categories. Only flag issues actually present.
 3. Classify the module's bottleneck as ONE of: IO-bound, memory-bound, compute-bound, graph-bound.
-4. Assign severity for each issue.
-5. If any CRITICAL, HIGH, or MEDIUM issue found, fix it end-to-end.
-6. Update the state CSV file.
+4. Assign severity for each issue. Repro gate for CRITICAL/HIGH: a timing comparison, task-graph report, or memory observation executed on the host demonstrating the cost.
+5. If any CRITICAL, HIGH, or MEDIUM issue found, fix it end-to-end. BENCHMARK REQUIREMENT: a PR fixing a HIGH finding must add or extend an asv benchmark under benchmarks/benchmarks/ covering the fixed code path, so the regression cannot silently return.
+6. Update the state CSV file (includes oom_verdict, bottleneck, and high_count columns).
 
 ## General rules
 
 - Only flag patterns actually present in the code.
-- For CUDA code, verify register pressure and bounds before flagging.
+- For CUDA code, verify register pressure and bounds before flagging (compile or run when CUDA is available, don't guess from source).
 - Do NOT flag the use of numba @jit itself as a performance issue.
 - Do NOT call .compute() in any analysis script -- graph construction only.

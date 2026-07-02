@@ -1,0 +1,34 @@
+---
+description: "Audit xrspatial modules for asv benchmark coverage gaps: missing benchmarks, backend parameterization gaps, unrepresentative inputs, broken or silently-skipped benchmarks"
+globs: "*.py"
+---
+
+# Sweep Benchmarks: asv Benchmark Coverage Audit
+
+Audit xrspatial modules for benchmark coverage gaps in the asv suite under `benchmarks/benchmarks/`. Without benchmark coverage, the performance sweep's fixes have no regression safety net. Fixes are adding or repairing benchmarks -- never source changes.
+
+## Categories to audit
+
+1. **Missing benchmarks**: a public function with a nontrivial compute path has no benchmark at all, or is benchmarked only indirectly inside another function's benchmark. HIGH for dask/CUDA modules (regressions there are the expensive ones).
+
+2. **Backend coverage gaps**: module implements a dask or cupy backend the benchmark never parameterizes (a backend-specific regression would ship unseen), dask benchmark using a single chunk so it measures the numpy path plus overhead rather than real chunked execution.
+
+3. **Unrepresentative inputs**: benchmark input so small (< ~256x256) that setup overhead dominates, only one input size so complexity regressions are invisible, degenerate data patterns (all zeros) where the algorithm's cost depends on data (e.g. queue-based hydro tools).
+
+4. **Broken or silently-skipped benchmarks**: benchmark file fails to import or raises during setup (run `asv dev -b <module>` and observe -- a broken benchmark reports nothing and nobody notices), benchmark skipped by an environment guard that is wrong.
+
+## Process
+
+1. Read the module files, its benchmark file (if any), 2-3 existing well-parameterized benchmark files as the pattern to follow, and asv.conf.json.
+2. Build the coverage matrix: for each public function, which backends and input sizes does the suite exercise?
+3. Audit for the 4 categories. Only flag gaps actually present.
+4. Assign severity. Repro-gate evidence: the coverage matrix for Cat 1/2, the observed timing/skip output for Cat 3/4.
+5. If any CRITICAL, HIGH, or MEDIUM gap found, add or repair benchmarks. Benchmark-only PRs -- never source changes. Every new benchmark must execute once locally (numpy/dask always; cupy only when CUDA is available, otherwise follow the suite's GPU-guard pattern and note it was not run).
+6. Update the state CSV file.
+
+## General rules
+
+- A broken benchmark is worse than a missing one.
+- Keep total added benchmark runtime reasonable -- prefer one realistic size plus one small size over a size ladder.
+- Do not change asv.conf.json machine/environment settings; only add benchmark code.
+- If running a benchmark surfaces a real performance bug, file a separate performance issue and link it.

@@ -1,0 +1,35 @@
+---
+description: "Audit xrspatial modules for documentation gaps: missing docstrings, docstring/signature drift, broken runnable examples, API reference coverage, backend-claim accuracy"
+globs: "*.py"
+---
+
+# Sweep Documentation: Documentation Coverage and Quality Audit
+
+Audit xrspatial modules for documentation gaps and quality issues. The project uses NumPy-style (numpydoc) docstrings: Parameters, Returns, Notes, References, Examples.
+
+## Categories to audit
+
+1. **Missing/Incomplete Docstrings**: public function (exported in xrspatial/__init__.py) or module with no docstring, public function missing a required NumPy section (Parameters, Returns, Examples), non-trivial public function with only a one-line stub.
+
+2. **Docstring/Signature Drift**: documented parameter that does not exist in the signature, signature parameter undocumented, parameter order disagreeing with the signature, documented default or type contradicting the code.
+
+3. **Broken or Outdated Runnable Examples**: `>>>` example blocks with wrong/missing imports, example code that raises when executed, examples using renamed or removed APIs, clearly stale example output.
+
+4. **API Reference Coverage Gaps (rst)**: public function absent from every autosummary block under docs/source/reference/*.rst, stale entries for removed functions, duplicated entries across reference pages.
+
+5. **Documentation Accuracy / Backend-Claim Drift**: Returns description stating a dtype/shape the code contradicts, docstring claiming CuPy/Dask backend support the code does not provide (verify against the actual ArrayTypeFunctionMapping dispatch), undocumented NaN/nodata semantics.
+
+## Process
+
+1. Measured truth first: run the existing docstring-validation tests and execute each public function's `>>>` example blocks (numpy/dask always; cupy only if CUDA is available). Observed failures are the primary Cat 2/3 findings.
+2. Read the module files, xrspatial/__init__.py (to determine what is public), and the matching docs/source/reference/*.rst pages.
+3. Audit for the 5 categories. Only flag issues actually present.
+4. Assign severity + file:line. Repro gate: for CRITICAL/HIGH Cat 2/3/5 findings the reproduction is the executed example or check whose output shows the drift.
+5. If any CRITICAL, HIGH, or MEDIUM issue found, fix it. For LOW issues, document but do not fix.
+6. Update the state CSV file (includes a `doc_coverage` column like `12/14` documented/total public functions).
+
+## General rules
+
+- DOC-ONLY constraint: fixes edit docstrings, .rst pages, and examples only -- never function behavior. If a broken example reveals a real code bug, file a separate accuracy issue instead of changing behavior to match the doc.
+- "Public" means exported in xrspatial/__init__.py; internal helpers do not need full numpydoc docstrings.
+- A documented contract that the code violates is an accuracy bug, not a docstring edit.

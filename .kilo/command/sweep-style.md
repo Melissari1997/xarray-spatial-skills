@@ -10,59 +10,42 @@ so drift is invisible. Subagents fix HIGH and MEDIUM findings via rockout;
 LOW findings are recorded but not auto-fixed to avoid nitpick PRs.
 
 Optional arguments: {{ARGUMENTS}}
-(e.g. `--top 3`, `--exclude slope,aspect`, `--only-terrain`, `--reset-state`)
+(e.g. `--top 3`, `--exclude slope,aspect`, `--only-terrain`, `--reset-state`,
+`--no-fix`)
+
+**Read `.kilo/command/_sweep-common.md` first.** It defines module
+discovery, the standard flag set, module groups, the CUDA probe, the
+state-CSV contract, the severity rubric, the repro gate, and the agent
+contract. This file adds only what is specific to the style sweep. Two
+common sections do NOT apply here: skip the CUDA probe (style is static and
+applies uniformly across backend paths), and the repro gate is satisfied by
+flake8/isort output itself — no separate reproduction script is needed.
 
 ---
 
-## Step 1 -- Gather module metadata via git, grep, and flake8
+## Step 0 -- Parse arguments
 
-Enumerate candidate modules:
+Parse the standard flags per _sweep-common.md (no extra flags for this
+sweep). No CUDA probe.
 
-**Single-file modules:** Every `.py` file directly under `xrspatial/`, excluding
-`__init__.py`, `_version.py`, `__main__.py`, `utils.py`, `accessor.py`,
-`preview.py`, `dataset_support.py`, `diagnostics.py`, `analytics.py`.
+## Step 1 -- Discover modules and gather metadata
 
-**Subpackage modules:** `geotiff/`, `reproject/`, and `hydro/` directories under
-`xrspatial/`. Treat each as a single audit unit. List all `.py` files within
-each (excluding `__init__.py`).
-
-For every module, collect:
+Discover modules per _sweep-common.md. Collect the common metadata fields
+(last_modified, total_commits, loc, public_funcs) plus:
 
 | Field | How |
 |-------|-----|
-| **last_modified** | `git log -1 --format=%aI -- <path>` (for subpackages, most recent file) |
-| **total_commits** | `git log --oneline -- <path> \| wc -l` |
-| **loc** | `wc -l < <path>` (for subpackages, sum all files) |
-| **public_funcs** | count of functions at module level (heuristic: `^def [a-z]`) |
 | **flake8_baseline** | `flake8 <module_files> 2>&1 \| wc -l` — observed lint count using the existing `setup.cfg` `[flake8]` config |
-
-Store results in memory -- do NOT write intermediate files.
 
 ## Step 2 -- Load inspection state
 
-Read `.kilo/worktrees/sweep-style-state.csv`.
-
-If it does not exist, treat every module as never-inspected.
-
-If `{{ARGUMENTS}}` contains `--reset-state`, delete the file and treat
-everything as never-inspected.
-
-State file schema (one row per module):
+Read `.kilo/worktrees/sweep-style-state.csv` per the state-CSV contract in
+_sweep-common.md. Schema (one row per module):
 
 ```
 module,last_inspected,issue,severity_max,categories_found,notes
 slope,2026-05-01,1042,MEDIUM,1;4,"optional single-line notes"
 ```
-
-- `categories_found` is a semicolon-separated integer list (empty when null).
-- `notes` is CSV-quoted; newlines must be flattened to spaces on write so
-  every module stays exactly one line.
-
-The file is covered by a `merge=union` rule in `.gitattributes`, so two parallel sweeps touching different modules
-auto-merge without conflict. A transient duplicate-row state can occur
-after a merge if both branches modified the same module; the
-read-update-write cycle in step 5 keys rows by `module` and last-write-wins,
-so the next write cleans up.
 
 ## Step 3 -- Score each module
 
@@ -89,16 +72,9 @@ Rationale:
 
 ## Step 4 -- Apply filters from {{ARGUMENTS}}
 
-- `--top N` -- only audit the top N modules (default: 3)
-- `--exclude mod1,mod2` -- remove named modules from the list
-- `--only-terrain` -- restrict to: slope, aspect, curvature, terrain,
-  terrain_metrics, hillshade, sky_view_factor
-- `--only-focal` -- restrict to: focal, convolution, morphology, bilateral,
-  edge_detection, glcm
-- `--only-hydro` -- restrict to: flood, cost_distance, geodesic,
-  surface_distance, viewshed, erosion, diffusion, hydro (subpackage)
-- `--only-io` -- restrict to: geotiff, reproject, rasterize, polygonize
-- `--reset-state` -- delete the state file before scoring
+Apply the standard flags (`--top N` default 3, `--exclude`, `--only-<group>`,
+`--high-only`, `--reset-state`, `--include-experimental`) per
+_sweep-common.md.
 
 ## Step 5 -- Print the ranked table and launch subagents
 
@@ -117,9 +93,8 @@ sorted by score descending:
 
 ### 5b. Launch subagents for the top N modules
 
-For each of the top N modules (default 3), launch an Agent in parallel using
-`isolation: "worktree"` and `mode: "auto"`. All N agents must be dispatched
-in a single message so they run concurrently.
+Launch one Agent per selected module per the dispatch rules in
+_sweep-common.md (single message, `isolation: "worktree"`, `mode: "auto"`).
 
 Each agent's prompt must be self-contained and follow this template (adapt
 the module name, paths, and metadata):
@@ -190,12 +165,15 @@ Also read setup.cfg to confirm the project's flake8 and isort config
 3. For each real issue found, assign a severity (HIGH/MEDIUM/LOW) and note
    the exact file and line number. Group same-category issues into a single
    finding when they're trivially related (e.g. 12 trailing-whitespace
-   lines = one Cat 2 finding, not twelve).
+   lines = one Cat 2 finding, not twelve). The tool output IS the evidence
+   — no separate reproduction script is required for this sweep.
 
 4. If any HIGH or MEDIUM issue is found, run rockout to fix it end-to-end
    (GitHub issue, worktree branch, fix, tests, and PR). One rockout per
    module — the PR should bundle all HIGH+MEDIUM findings for that module
-   into a single coherent style cleanup.
+   into a single coherent style cleanup. Skip rockout entirely if the
+   parent sweep was run with --no-fix; record findings in the state notes
+   instead.
 
    For LOW findings (W-codes, single-line E501 on a long URL, cosmetic
    E2xx that don't reduce readability), document them in the state CSV
@@ -209,56 +187,21 @@ Also read setup.cfg to confirm the project's flake8 and isort config
    - Call out any Cat 3/5 fix that does change behaviour (e.g. removing
      an unused import that was actually re-exporting a symbol)
 
-5. After finishing (whether you found issues or not), update the inspection
-   state file `.kilo/worktrees/sweep-style-state.csv`. The file is row-per-module
-   CSV with header:
+5. After finishing (whether you found issues or not), update
+   `.kilo/worktrees/sweep-style-state.csv` following the state-CSV contract in
+   .kilo/command/_sweep-common.md (csv.DictReader/DictWriter pattern
+   with the `_oneline` sanitizer, one line per record). Header:
 
    `module,last_inspected,issue,severity_max,categories_found,notes`
 
-   Use this Python pattern to read, update, and write it (do NOT hand-edit
-   the file -- always go through csv.DictReader / csv.DictWriter so quoting
-   stays consistent):
+   Then `git add` and commit it to the worktree branch so the state update
+   is included in the PR.
 
-   ```python
-   import csv
-   from pathlib import Path
-
-   path = Path(".kilo/worktrees/sweep-style-state.csv")
-   header = ["module", "last_inspected", "issue", "severity_max",
-             "categories_found", "notes"]
-
-   rows = {}
-   if path.exists():
-       with path.open() as f:
-           for r in csv.DictReader(f):
-               rows[r["module"]] = r  # last write wins on dupes
-
-   rows["{module}"] = {
-       "module": "{module}",
-       "last_inspected": "<today's ISO date, e.g. 2026-05-21>",
-       "issue": "<issue number from rockout, or empty string>",
-       "severity_max": "<HIGH|MEDIUM|LOW, or empty>",
-       "categories_found": "<semicolon-joined ints, e.g. 1;4, or empty>",
-       "notes": "<single-line notes (replace any newlines with spaces), or empty>",
-   }
-
-   with path.open("w", newline="") as f:
-       w = csv.DictWriter(f, fieldnames=header, quoting=csv.QUOTE_MINIMAL)
-       w.writeheader()
-       for m in sorted(rows):
-           w.writerow(rows[m])
-   ```
-
-   Use empty strings (not `null`) for missing values. Set `issue` to the
-   issue number when one was filed, otherwise leave it empty.
-
-   Then `git add .kilo/worktrees/sweep-style-state.csv` and commit it to the
-   worktree branch so the state update is included in the PR.
-
-Important:
+Additional style-specific rules:
 - Only flag issues the tools actually report (flake8, isort) or that grep
   confirms for Cat 5. Style is subjective; the project has already drawn
-  the line at the configured `setup.cfg` settings.
+  the line at the configured `setup.cfg` settings. The sweep's job is
+  enforcement, not policy.
 - Do NOT run black, ruff format, autopep8, or any other auto-formatter.
   The project has not adopted a formatter and choosing one is a policy
   decision, not a sweep finding. Limit fixes to what flake8 + isort + the
@@ -269,10 +212,12 @@ Important:
 - For the hydro subpackage: run flake8 + isort across all `.py` files in
   the subpackage and treat them as one audit unit. Issues in dinf/mfd
   variants that mirror d8 should be fixed together in the same rockout PR.
-- This repo uses ArrayTypeFunctionMapping to dispatch across numpy/cupy/dask
-  backends. Style fixes are static and apply uniformly across backend
-  paths — no separate backend verification is needed (unlike security or
-  accuracy sweeps).
+- Style fixes are static and apply uniformly across backend paths — no
+  separate backend verification is needed (unlike security or accuracy
+  sweeps).
+
+{agent contract from _sweep-common.md, verbatim — its repro-gate line is
+satisfied by the linter output for this sweep}
 ```
 
 ### 5c. Print a status line
@@ -286,30 +231,4 @@ Launched {N} style audit agents: {module1}, {module2}, {module3}
 ## Step 6 -- State updates
 
 State is updated by the subagents themselves (see agent prompt step 5).
-After completion, verify state with:
-
-```
-column -t -s, .kilo/worktrees/sweep-style-state.csv | less
-```
-
 To reset all tracking: `sweep-style --reset-state`
-
----
-
-## General Rules
-
-- Do NOT modify any source files directly. Subagents handle fixes via rockout.
-- Keep the output concise -- the table and agent dispatch are the deliverables.
-- If {{ARGUMENTS}} is empty, use defaults: top 3, no category filter, no exclusions.
-- State file (`.kilo/worktrees/sweep-style-state.csv`) is tracked in git, covered by
-  a `merge=union` rule in `.gitattributes` so
-  parallel sweeps touching different modules auto-merge. Subagents must
-  `git add` and commit it so the state update lands in the PR.
-- For subpackage modules (geotiff, reproject, hydro), the subagent should run
-  flake8 + isort across ALL `.py` files in the subpackage directory, not
-  just `__init__.py`.
-- Only flag what the tools and grep actually report. Style is configured by
-  `setup.cfg`; the sweep's job is enforcement, not policy.
-- False positives are worse than missed issues. When a flake8 finding is a
-  legitimate exception (long URL, generated lookup table), the fix is a
-  `# noqa` on that line — not a config widening, not a silent suppression.

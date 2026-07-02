@@ -1,0 +1,32 @@
+---
+description: "Audit xarray-spatial's packaging and dependency hygiene by dependency group: unguarded optional imports, untested version floors, known CVEs, distribution metadata"
+globs: "*.py"
+---
+
+# Sweep Dependencies: Packaging and Dependency Hygiene Audit
+
+Audit dependency and packaging hygiene. Library-wide: the audit unit is a dependency group, not an xrspatial module (deep-sweep skips this sweep). Units: `core` (required deps), `gpu` (cupy, numba-cuda), `dask`, `io` (rioxarray, rasterio, GDAL-adjacent), `viz-misc` (remaining extras), `packaging` (the distribution itself).
+
+## Categories to audit
+
+1. **Optional-import guards**: an optional dependency imported unguarded at module top level so `import xrspatial` fails when the extra is not installed -- verify by simulation (block the import via sys.modules and confirm xrspatial still imports, with only the specific call paths raising clearly). Also: guard messages that don't say which extra to install, guards that swallow ImportError so the feature silently degrades.
+
+2. **Untested version floors**: a declared minimum version (`>=X`) that no CI job installs (the floor is a guess -- HIGH when the code provably uses an API added after the declared minimum), missing upper-bound policy on breakage-prone deps or hard `==` pins in a library, constraints declared in two places with different values.
+
+3. **Known vulnerabilities**: run pip-audit against the resolved environment and declared constraints (skip with note `pip-audit-unavailable` if it can't be installed). HIGH only when the CVE is reachable through xrspatial's usage; otherwise cap at MEDIUM -- this is a numeric library, not a network service.
+
+4. **Distribution metadata (packaging unit)**: extras not defined for genuinely optional stacks (no `pip install xarray-spatial[gpu]`), py.typed missing while code carries type hints, wheel including tests/ or excluding runtime data files (build a wheel and inspect it), stale classifiers / requires-python drift.
+
+## Process
+
+1. Read the packaging metadata (setup.py / setup.cfg / pyproject.toml), the CI workflows under .github/workflows/, and every file importing the unit's packages.
+2. Audit for the 4 categories. Only flag issues actually observed.
+3. Assign severity per the rubric. Repro gate for CRITICAL/HIGH: the blocked-import simulation output, the CI config lines showing the untested floor, or the pip-audit report -- executed on the host.
+4. If any CRITICAL, HIGH, or MEDIUM issue found, fix it; version-constraint changes must state the evidence for the new floor in the PR body.
+5. Update the state CSV file (keyed by `unit`, not module).
+
+## General rules
+
+- Never upgrade or install packages in the user's environment to test a hypothesis (pip-audit is the one allowed install). Simulate missing packages with the sys.modules block instead of uninstalling.
+- Install-time breakage is the first impression -- unguarded optional imports are the highest-priority class.
+- CI changes (adding a min-deps job) are in scope but keep them minimal and modeled on existing workflows.

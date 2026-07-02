@@ -8,75 +8,76 @@ Subagents fix CRITICAL, HIGH, and MEDIUM findings via rockout — fixes
 here are *adding tests*, not changing source code.
 
 Optional arguments: {{ARGUMENTS}}
-(e.g. `--top 3`, `--exclude slope,aspect`, `--only-terrain`, `--reset-state`)
+(e.g. `--top 3`, `--exclude slope,aspect`, `--only-terrain`, `--reset-state`,
+`--no-fix`)
+
+**Read `.kilo/command/_sweep-common.md` first.** It defines module
+discovery, the standard flag set, module groups, the CUDA probe, the
+state-CSV contract, the severity rubric, the repro gate, and the agent
+contract. This file adds only what is specific to the test-coverage sweep.
 
 ---
 
-## Step 0 -- Detect CUDA availability
+## Step 0 -- Parse arguments and probe CUDA
 
-Before discovering modules, probe the host for CUDA:
+Parse the standard flags per _sweep-common.md (no extra flags for this
+sweep). Run the CUDA availability probe and capture `CUDA_AVAILABLE`. For
+this sweep the flag decides whether new cupy / dask+cupy tests can be
+executed locally or only added with the project's GPU-skip guard.
 
-```bash
-python -c "from numba import cuda; print(cuda.is_available())" 2>/dev/null
-```
+## Step 1 -- Discover modules and gather metadata
 
-Capture the result as `CUDA_AVAILABLE` (`true` if the command prints `True`,
-`false` otherwise — including import failure). Interpolate this flag into
-each subagent prompt below so the agent knows whether new tests can be
-executed against cupy / dask+cupy backends or only added with a `pytest.skip`
-guard for environments without CUDA.
-
-## Step 1 -- Gather module metadata via git
-
-Enumerate candidate modules:
-
-**Single-file modules:** Every `.py` file directly under `xrspatial/`, excluding
-`__init__.py`, `_version.py`, `__main__.py`, `utils.py`, `accessor.py`,
-`preview.py`, `dataset_support.py`, `diagnostics.py`, `analytics.py`.
-
-**Subpackage modules:** `geotiff/`, `reproject/`, and `hydro/` directories under
-`xrspatial/`. Treat each as a single audit unit.
-
-For every module, collect:
+Discover modules per _sweep-common.md. Collect the common metadata fields
+(last_modified, total_commits, loc, public_funcs) plus measured coverage:
 
 | Field | How |
 |-------|-----|
-| **last_modified** | `git log -1 --format=%aI -- <path>` |
-| **total_commits** | `git log --oneline -- <path> \| wc -l` |
-| **loc** | `wc -l < <path>` |
 | **test_loc** | `wc -l < xrspatial/tests/test_<module>.py` (or 0 if absent) |
-| **public_funcs** | count of `^def [a-z]` in module |
+| **branch_cov** | measured branch coverage percent — see below (0 if no test file) |
 
-Store results in memory.
+Measure `branch_cov` with one batched run over the selected candidates
+(coverage is the measured truth here, the way flake8 output is for the
+style sweep):
+
+```bash
+NUMBA_DISABLE_JIT=1 python -m pytest xrspatial/tests/test_<module>.py \
+    --cov=xrspatial.<module> --cov-branch --cov-report=json:<scratchpad>/cov_<module>.json -q
+```
+
+`NUMBA_DISABLE_JIT=1` is required: coverage instrumentation clashes with
+numba's extension registration under pytest-cov (observed as `KeyError:
+duplicate registration`), and disabling JIT is also what makes kernel
+bodies traceable — compiled code is invisible to coverage.
+
+Parse `totals.percent_covered` from each JSON (round to an integer). For
+subpackages, use `--cov=xrspatial.<subpackage>` and the subpackage's test
+file(s). If the test run errors, record `branch_cov = 0` and note
+`tests-broken` — a broken test file is itself a HIGH finding for the agent.
+Keep the per-module JSON files; each agent gets its module's uncovered-line
+report.
 
 ## Step 2 -- Load inspection state
 
-Read `.kilo/worktrees/sweep-test-coverage-state.csv`.
-
-If absent, treat every module as never-inspected. If `{{ARGUMENTS}}` has
-`--reset-state`, delete the file first.
-
-State file schema:
+Read `.kilo/worktrees/sweep-test-coverage-state.csv` per the state-CSV contract in
+_sweep-common.md. Schema (one row per module):
 
 ```
-module,last_inspected,issue,severity_max,categories_found,notes
-slope,2026-05-01,1042,HIGH,1;3,"optional single-line notes"
+module,last_inspected,issue,severity_max,categories_found,branch_cov,notes
+slope,2026-05-01,1042,HIGH,1;3,87,"optional single-line notes"
 ```
 
-`merge=union` is set in `.gitattributes`.
+(Older state files may lack the `branch_cov` column; the read-update-write
+pattern backfills it as empty for rows not yet re-inspected.)
 
 ## Step 3 -- Score each module
 
 ```
-days_since_inspected = (today - last_inspected).days
+days_since_inspected = (today - last_inspected).days   # 9999 if never
 days_since_modified  = (today - last_modified).days
-
-# Coverage ratio: low test_loc relative to source = higher score
-coverage_deficit = max(0, loc - test_loc) / max(loc, 1)
 
 score = (days_since_inspected * 3)
       + (public_funcs * 5)
-      + (coverage_deficit * 200)
+      + ((100 - branch_cov) * 4)
       + (total_commits * 0.3)
       - (days_since_modified * 0.1)
       + (loc * 0.03)
@@ -84,36 +85,38 @@ score = (days_since_inspected * 3)
 
 Rationale:
 - Modules never inspected dominate
-- Coverage deficit (test_loc << source_loc) is a strong signal
+- Measured branch-coverage deficit is the strongest signal (up to 400 for a
+  totally untested module) — observed truth, not a LOC-ratio proxy
 - Public functions weighted: each public function is an independent
   test surface
 - Recently modified slightly deprioritized
 
 ## Step 4 -- Apply filters from {{ARGUMENTS}}
 
-Same filter set as other sweeps: `--top N`, `--exclude`, `--only-terrain`,
-`--only-focal`, `--only-hydro`, `--only-io`, `--reset-state`.
+Apply the standard flags (`--top N` default 3, `--exclude`, `--only-<group>`,
+`--high-only`, `--reset-state`, `--include-experimental`) per
+_sweep-common.md.
 
 ## Step 5 -- Print the ranked table and launch subagents
 
 ### 5a. Print the ranked table
 
-Show all scored modules sorted by score descending. Include a `Coverage`
-column (`test_loc / source_loc` ratio).
+Show all scored modules sorted by score descending. Include a `Branch Cov`
+column (measured percent) alongside Rank, Module, Score, Last Inspected,
+Pub Funcs, LOC.
 
 ### 5b. Launch subagents for the top N modules
 
-For each of the top N modules (default 3), launch an Agent in parallel
-using `isolation: "worktree"` and `mode: "auto"`. All N must be in a
-single message.
+Launch one Agent per selected module per the dispatch rules in
+_sweep-common.md (single message, `isolation: "worktree"`, `mode: "auto"`).
 
 Each agent's prompt must be self-contained:
 
 ```
 You are auditing the xrspatial module "{module}" for test coverage gaps.
 
-This module has {commits} commits, {loc} lines of source, and {test_loc}
-lines of tests.
+This module has {commits} commits, {loc} lines of source, {test_loc} lines
+of tests, and MEASURED branch coverage of {branch_cov}%.
 
 Read these files:
 - {module_files}
@@ -121,6 +124,13 @@ Read these files:
 - xrspatial/tests/general_checks.py (cross-backend test helpers)
 - xrspatial/utils.py (ArrayTypeFunctionMapping, _validate_raster)
 - xrspatial/conftest.py (shared fixtures)
+
+The parent already ran pytest with branch coverage; the uncovered-line
+report for this module is at {cov_json_path}. Start from it: every
+uncovered branch is a candidate gap, and every gap you flag should
+correspond to genuinely unexercised behavior, not just an uncovered line
+of boilerplate. Re-run the coverage command yourself if you need fresher
+data after reading the tests.
 
 CUDA available on this host: {cuda_available}
 
@@ -144,7 +154,8 @@ If CUDA_AVAILABLE is false:
 
 1. Read the module and its tests thoroughly. Build a mental matrix:
    for each public function, which backends and which edge cases are
-   currently tested?
+   currently tested? Cross-check the matrix against the uncovered-line
+   report.
 
 2. Audit for these 5 coverage-gap categories. Only flag gaps ACTUALLY
    present (the test file does not exercise the path).
@@ -207,64 +218,40 @@ If CUDA_AVAILABLE is false:
    Severity: HIGH if this module reads attrs for math (cellsize,
    resolution) — its result correctness depends on these being correct
 
-3. For each real gap, assign severity + which test should be added.
+3. For each real gap, assign severity per the rubric in _sweep-common.md
+   plus which test should be added. The repro-gate evidence for a
+   CRITICAL/HIGH gap is the coverage report line(s) or a demonstration
+   that the new test exercises a previously-unexercised path (coverage
+   before/after).
 
 4. If any CRITICAL, HIGH, or MEDIUM gap is found, run rockout to add
    tests. The fix in this sweep is *test-only* — do not modify source
    unless a test surfaces a bug, in which case file a separate accuracy
-   issue. For LOW gaps, document but do not add tests.
+   issue. For LOW gaps, document but do not add tests. Skip rockout
+   entirely if the parent sweep was run with --no-fix; record findings in
+   the state notes instead.
 
-5. Update .kilo/worktrees/sweep-test-coverage-state.csv:
+5. After finishing (whether you found issues or not), update
+   .kilo/worktrees/sweep-test-coverage-state.csv following the state-CSV contract
+   in .kilo/command/_sweep-common.md (csv.DictReader/DictWriter pattern,
+   one line per record). Header:
 
-   ```python
-   import csv
-   from pathlib import Path
+   `module,last_inspected,issue,severity_max,categories_found,branch_cov,notes`
 
-   path = Path(".kilo/worktrees/sweep-test-coverage-state.csv")
-   header = ["module", "last_inspected", "issue", "severity_max",
-             "categories_found", "notes"]
+   Set `branch_cov` to the measured percent AFTER your added tests (re-run
+   the coverage command), so the state row records the improvement. Then
+   `git add` and commit.
 
-   rows = {}
-   if path.exists():
-       with path.open() as f:
-           for r in csv.DictReader(f):
-               rows[r["module"]] = r
-
-   rows["{module}"] = {
-       "module": "{module}",
-       "last_inspected": "<today's ISO date>",
-       "issue": "<issue or empty>",
-       "severity_max": "<HIGH|MEDIUM|LOW or empty>",
-       "categories_found": "<semicolon-joined ints or empty>",
-       "notes": "<single-line notes or empty>",
-   }
-
-   def _oneline(v):
-       # merge=union is line-based: a newline inside a quoted field splits
-       # the record on parallel-agent merges. Force one physical line per
-       # record by collapsing embedded newlines to " | ".
-       return "" if v is None else str(v).replace("\r\n", " | ").replace("\r", " | ").replace("\n", " | ")
-
-   with path.open("w", newline="") as f:
-       w = csv.DictWriter(f, fieldnames=header, quoting=csv.QUOTE_MINIMAL)
-       w.writeheader()
-       for m in sorted(rows):
-           w.writerow({k: _oneline(v) for k, v in rows[m].items()})
-   ```
-
-   Then `git add` and commit.
-
-Important:
-- The "fix" for this sweep is *adding tests*. If adding a test surfaces
-  a bug in the source code, do NOT bundle the source fix — file a
-  separate accuracy / performance / metadata issue and link it from the
-  test PR.
-- Only flag real gaps. If a test exists but is sloppy, that is not a
-  coverage gap — that's a test quality issue out of scope here.
+Additional test-coverage-specific rules:
+- If a test exists but is sloppy, that is not a coverage gap — that's a
+  test quality issue out of scope here.
 - Some functions genuinely do not need NaN coverage (procedural noise
   generators that take no raster input). Use judgment.
-- For the hydro subpackage: focus on one representative variant (d8) and
-  note dinf/mfd parity in the audit notes.
+- If the module's test file itself fails to run (`tests-broken` in the
+  parent metadata), fixing the test file so it runs is your first HIGH
+  finding.
+
+{agent contract from _sweep-common.md, verbatim}
 ```
 
 ### 5c. Print a status line
@@ -277,17 +264,5 @@ Launched {N} test coverage audit agents: {module1}, {module2}, {module3}
 
 ## Step 6 -- State updates
 
-To reset: `sweep-test-coverage --reset-state`
-
----
-
-## General Rules
-
-- Do NOT modify any source files. Subagents add tests via rockout.
-- Keep parent output concise.
-- Default: top 3, no filter.
-- State file `.kilo/worktrees/sweep-test-coverage-state.csv` is tracked in git
-  with `merge=union`.
-- The "fix" is *tests, not source*. If a test reveals a bug, file a
-  separate issue — do not change source in this sweep's PRs.
-- False positives are worse than missed issues.
+State is updated by the subagents themselves (see agent prompt step 5).
+To reset all tracking: `sweep-test-coverage --reset-state`

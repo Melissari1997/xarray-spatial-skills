@@ -6,76 +6,45 @@ kernel bounds, file path injection, and dtype confusion. Subagents fix
 CRITICAL, HIGH, and MEDIUM severity issues via rockout.
 
 Optional arguments: {{ARGUMENTS}}
-(e.g. `--top 3`, `--exclude slope,aspect`, `--only-io`, `--reset-state`)
+(e.g. `--top 3`, `--exclude slope,aspect`, `--only-io`, `--reset-state`,
+`--no-fix`)
+
+**Read `.kilo/command/_sweep-common.md` first.** It defines module
+discovery, the standard flag set, module groups, the CUDA probe, the
+state-CSV contract, the severity rubric, the repro gate, and the agent
+contract. This file adds only what is specific to the security sweep.
 
 ---
 
-## Step 0 -- Detect CUDA availability
+## Step 0 -- Parse arguments and probe CUDA
 
-Before discovering modules, probe the host for CUDA:
+Parse the standard flags per _sweep-common.md (no extra flags for this
+sweep). Run the CUDA availability probe and capture `CUDA_AVAILABLE`.
 
-```bash
-python -c "from numba import cuda; print(cuda.is_available())" 2>/dev/null
-```
+## Step 1 -- Discover modules and gather metadata
 
-Capture the result as `CUDA_AVAILABLE` (`true` if the command prints `True`,
-`false` otherwise — including import failure). Interpolate this flag into
-each subagent prompt below so the agent knows whether to run cupy and
-dask+cupy paths or limit itself to static review of the GPU code.
-
-## Step 1 -- Gather module metadata via git and grep
-
-Enumerate candidate modules:
-
-**Single-file modules:** Every `.py` file directly under `xrspatial/`, excluding
-`__init__.py`, `_version.py`, `__main__.py`, `utils.py`, `accessor.py`,
-`preview.py`, `dataset_support.py`, `diagnostics.py`, `analytics.py`.
-
-**Subpackage modules:** `geotiff/`, `reproject/`, and `hydro/` directories under
-`xrspatial/`. Treat each as a single audit unit. List all `.py` files within
-each (excluding `__init__.py`).
-
-For every module, collect:
+Discover modules per _sweep-common.md. Collect the common metadata fields
+(last_modified, total_commits, loc) plus:
 
 | Field | How |
 |-------|-----|
-| **last_modified** | `git log -1 --format=%aI -- <path>` (for subpackages, most recent file) |
-| **total_commits** | `git log --oneline -- <path> \| wc -l` |
-| **loc** | `wc -l < <path>` (for subpackages, sum all files) |
 | **has_cuda_kernels** | grep file(s) for `@cuda.jit` |
 | **has_file_io** | grep file(s) for `open(`, `mkstemp`, `os.path`, `pathlib` |
 | **has_numba_jit** | grep file(s) for `@ngjit`, `@njit`, `@jit`, `numba.jit` |
 | **allocates_from_dims** | grep file(s) for `np.empty(height`, `np.zeros(height`, `np.empty(H`, `np.empty(h `, `cp.empty(`, and width variants |
 | **has_shared_memory** | grep file(s) for `cuda.shared.array` |
 
-Store results in memory -- do NOT write intermediate files.
-
 ## Step 2 -- Load inspection state
 
-Read `.kilo/worktrees/sweep-security-state.csv`.
-
-If it does not exist, treat every module as never-inspected.
-
-If `{{ARGUMENTS}}` contains `--reset-state`, delete the file and treat
-everything as never-inspected.
-
-State file schema (one row per module):
+Read `.kilo/worktrees/sweep-security-state.csv` per the state-CSV contract in
+_sweep-common.md. Schema (one row per module):
 
 ```
 module,last_inspected,issue,severity_max,categories_found,followup_issues,notes
 cost_distance,2026-04-10,1150,HIGH,1;2,,"optional single-line notes"
 ```
 
-- `categories_found` and `followup_issues` are semicolon-separated integer
-  lists (empty when null).
-- `notes` is CSV-quoted; newlines must be flattened to spaces on write so
-  every module stays exactly one line.
-
-The file is registered with `merge=union` in `.gitattributes`, so two
-parallel sweeps touching different modules auto-merge without conflict.
-A transient duplicate-row state can occur after a merge if both branches
-modified the same module; the read-update-write cycle in step 5 keys rows
-by `module` and last-write-wins, so the next write cleans up.
+- `followup_issues` is a semicolon-separated integer list (empty when null).
 
 ## Step 3 -- Score each module
 
@@ -104,15 +73,9 @@ Rationale:
 
 ## Step 4 -- Apply filters from {{ARGUMENTS}}
 
-- `--top N` -- only audit the top N modules (default: 3)
-- `--exclude mod1,mod2` -- remove named modules from the list
-- `--only-terrain` -- restrict to: slope, aspect, curvature, terrain,
-  terrain_metrics, hillshade, sky_view_factor
-- `--only-focal` -- restrict to: focal, convolution, morphology, bilateral,
-  edge_detection, glcm
-- `--only-hydro` -- restrict to: flood, cost_distance, geodesic,
-  surface_distance, viewshed, erosion, diffusion, hydro (subpackage)
-- `--only-io` -- restrict to: geotiff, reproject, rasterize, polygonize
+Apply the standard flags (`--top N` default 3, `--exclude`, `--only-<group>`,
+`--high-only`, `--reset-state`, `--include-experimental`) per
+_sweep-common.md.
 
 ## Step 5 -- Print the ranked table and launch subagents
 
@@ -131,9 +94,8 @@ sorted by score descending:
 
 ### 5b. Launch subagents for the top N modules
 
-For each of the top N modules (default 3), launch an Agent in parallel using
-`isolation: "worktree"` and `mode: "auto"`. All N agents must be dispatched
-in a single message so they run concurrently.
+Launch one Agent per selected module per the dispatch rules in
+_sweep-common.md (single message, `isolation: "worktree"`, `mode: "auto"`).
 
 Each agent's prompt must be self-contained and follow this template (adapt
 the module name, paths, and metadata):
@@ -158,15 +120,12 @@ If CUDA_AVAILABLE is true:
 - For Cat 1 (unbounded allocation) on cupy paths, confirm the
   allocation actually executes on the GPU and observe peak memory via
   `cupy.cuda.runtime.memGetInfo()` rather than reasoning from source.
-- A rockout fix that touches CUDA code must include a cupy run in its
-  verification step before opening the PR.
 
 If CUDA_AVAILABLE is false:
 - Inspect the cupy / dask+cupy paths and CUDA kernels by reading the
   source only.
 - Skip executing CUDA kernels. Add the token `cuda-unavailable` to the
-  `notes` column of the state CSV so a future re-run on a GPU host
-  knows to re-validate the GPU paths.
+  `notes` column of the state CSV.
 
 **Your task:**
 
@@ -224,77 +183,35 @@ If CUDA_AVAILABLE is false:
    the error message is misleading
 
 3. For each real issue found, assign a severity (CRITICAL/HIGH/MEDIUM/LOW)
-   and note the exact file and line number.
+   per the rubric in _sweep-common.md and note the exact file and line
+   number. Apply the repro gate: CRITICAL/HIGH findings on CPU-runnable
+   paths (Cat 1-3, 5, 6) need a runnable reproduction executed on this
+   host — e.g. the crafted input that triggers the overflow, traversal, or
+   silent wrong result. GPU-only findings without CUDA stay static; mark
+   them `unverified-static`.
 
 4. If any CRITICAL, HIGH, or MEDIUM issue is found, run rockout to fix it
    end-to-end (GitHub issue, worktree branch, fix, tests, and PR).
-   For LOW issues, document them but do not fix.
+   For LOW issues, document them but do not fix. Skip rockout entirely if
+   the parent sweep was run with --no-fix; record findings in the state
+   notes instead.
 
-5. After finishing (whether you found issues or not), update the inspection
-   state file .kilo/worktrees/sweep-security-state.csv. The file is row-per-module
-   CSV with header:
+5. After finishing (whether you found issues or not), update
+   .kilo/worktrees/sweep-security-state.csv following the state-CSV contract in
+   .kilo/command/_sweep-common.md (csv.DictReader/DictWriter pattern,
+   one line per record). Header:
 
    `module,last_inspected,issue,severity_max,categories_found,followup_issues,notes`
 
-   Use this Python pattern to read, update, and write it (do NOT hand-edit
-   the file -- always go through csv.DictReader / csv.DictWriter so quoting
-   stays consistent):
+   Then `git add` and commit it to the worktree branch so the state update
+   is included in the PR.
 
-   ```python
-   import csv
-   from pathlib import Path
+Additional security-specific rules:
+- Only flag real, exploitable issues.
+- For CUDA code, verify bounds guards are truly missing -- many kernels
+  already have `if i >= H or j >= W: return`.
 
-   path = Path(".kilo/worktrees/sweep-security-state.csv")
-   header = ["module", "last_inspected", "issue", "severity_max",
-             "categories_found", "followup_issues", "notes"]
-
-   rows = {}
-   if path.exists():
-       with path.open() as f:
-           for r in csv.DictReader(f):
-               rows[r["module"]] = r  # last write wins on dupes
-
-   rows["{module}"] = {
-       "module": "{module}",
-       "last_inspected": "<today's ISO date, e.g. 2026-04-27>",
-       "issue": "<issue number from rockout, or empty string>",
-       "severity_max": "<HIGH|MEDIUM|LOW, or empty>",
-       "categories_found": "<semicolon-joined ints, e.g. 1;2, or empty>",
-       "followup_issues": "<semicolon-joined ints, or empty>",
-       "notes": "<single-line notes (replace any newlines with spaces), or empty>",
-   }
-
-   def _oneline(v):
-       # merge=union is line-based: a newline inside a quoted field splits
-       # the record on parallel-agent merges. Force one physical line per
-       # record by collapsing embedded newlines to " | ".
-       return "" if v is None else str(v).replace("\r\n", " | ").replace("\r", " | ").replace("\n", " | ")
-
-   with path.open("w", newline="") as f:
-       w = csv.DictWriter(f, fieldnames=header, quoting=csv.QUOTE_MINIMAL)
-       w.writeheader()
-       for m in sorted(rows):
-           w.writerow({k: _oneline(v) for k, v in rows[m].items()})
-   ```
-
-   Use empty strings (not `null`) for missing values. Set `issue` to the
-   issue number when one was filed, otherwise leave it empty.
-
-   Then `git add .kilo/worktrees/sweep-security-state.csv` and commit it to the
-   worktree branch so the state update is included in the PR.
-
-Important:
-- Only flag real, exploitable issues. False positives waste time.
-- Read the tests for this module to understand expected behavior.
-- For CUDA code, verify bounds guards are truly missing -- many kernels already
-  have `if i >= H or j >= W: return`.
-- Do NOT flag the use of numba @jit itself as a security issue. Focus on what
-  the JIT code does, not that it uses JIT.
-- For the hydro subpackage: focus on one representative variant (d8) in detail,
-  then note which dinf/mfd files share the same pattern. Do not read all 29
-  files line by line.
-- This repo uses ArrayTypeFunctionMapping to dispatch across numpy/cupy/dask
-  backends. Check all backend paths, not just numpy.
+{agent contract from _sweep-common.md, verbatim}
 ```
 
 ### 5c. Print a status line
@@ -308,27 +225,4 @@ Launched {N} security audit agents: {module1}, {module2}, {module3}
 ## Step 6 -- State updates
 
 State is updated by the subagents themselves (see agent prompt step 5).
-After completion, verify state with:
-
-```
-column -t -s, .kilo/worktrees/sweep-security-state.csv | less
-```
-
 To reset all tracking: `sweep-security --reset-state`
-
----
-
-## General Rules
-
-- Do NOT modify any source files directly. Subagents handle fixes via rockout.
-- Keep the output concise -- the table and agent dispatch are the deliverables.
-- If {{ARGUMENTS}} is empty, use defaults: top 3, no category filter, no exclusions.
-- State file (`.kilo/worktrees/sweep-security-state.csv`) is tracked in git, with
-  `merge=union` set in `.gitattributes` so parallel sweeps touching
-  different modules auto-merge. Subagents must `git add` and commit it so
-  the state update lands in the PR.
-- For subpackage modules (geotiff, reproject, hydro), the subagent should read
-  ALL `.py` files in the subpackage directory, not just `__init__.py`.
-- Only flag patterns that are ACTUALLY present in the code. Do not report
-  hypothetical issues or patterns that "could" occur with imaginary inputs.
-- False positives are worse than missed issues. When in doubt, skip.

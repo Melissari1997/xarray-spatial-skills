@@ -1,0 +1,45 @@
+---
+description: "Shared contract for all sweep-* rules: module discovery, standard flags, severity rubric, state CSVs, and the repro gate every CRITICAL/HIGH finding must pass"
+globs: "*.py"
+---
+
+# Sweep Common: Shared Contract for All Sweeps
+
+Not a runnable sweep. Defines the machinery every sweep-* rule references: module discovery, standard flags, the severity rubric, the state-CSV contract, and the repro gate.
+
+## Module discovery
+
+- Single-file modules: every `.py` file directly under `xrspatial/`, excluding `__init__.py`, `_version.py`, `__main__.py`, `_template_data.py`, `templates.py`, `utils.py`, `accessor.py`, `preview.py`, `dataset_support.py`, `diagnostics.py`, `analytics.py`, `validate.py`.
+- Subpackage modules: every directory under `xrspatial/` containing `.py` files, excluding `tests/`, `datasets/`, `experimental/`, `__pycache__/`. Each subpackage is one audit unit. Always re-derive the list from the filesystem so new subpackages enter scope automatically.
+
+## Standard flags
+
+- `--top N`: audit only the top N scored modules (default 3)
+- `--exclude mod1,mod2`: remove named modules from scope
+- `--only-<group>`: restrict to one module group (terrain, focal, hydro, io, stats, synth)
+- `--reset-state`: delete the sweep's state CSV before scoring
+- `--no-fix`: audit only, no rockout, no PRs; state CSV still updated with findings in notes
+- `--high-only`: drop modules below HIGH severity that were inspected within 30 days (never filters a never-inspected module)
+- `--include-experimental`: add the `experimental/` and `datasets/` subpackages to discovery
+
+## Severity rubric
+
+- **CRITICAL**: memory corruption, out-of-bounds writes, or a wrong result that silently poisons downstream analysis with no way for the user to notice.
+- **HIGH**: wrong or misleading result on realistic inputs; a public API that errors on copy-paste usage; a bug class that has shipped before.
+- **MEDIUM**: wrong only on edge-case inputs; inconsistency that surprises but does not corrupt; documented-but-wrong claims.
+- **LOW**: cosmetic, internal-only, or requires adversarial inputs no real workflow produces. Documented in state notes, never auto-fixed.
+
+## Repro gate
+
+Every CRITICAL/HIGH finding needs a runnable reproduction -- a short script or failing test actually executed on the host -- before an issue is filed; include the code and observed output in the issue body. The numpy and dask+numpy backends run on every host; cupy/dask+cupy only when CUDA is available (GPU-only findings on a non-GPU host stay static, marked `unverified-static`). The style sweep is exempt: linter output is the evidence. A finding that cannot be reproduced when the code path is runnable is a false positive -- do not file it.
+
+## State CSVs
+
+Each sweep owns `sweep-{name}-state.csv`, one row per module, updated via csv.DictReader/DictWriter (never hand-edited), one physical line per record.
+
+## General rules
+
+- Only flag issues actually present; false positives are worse than missed issues.
+- Check all backend paths (ArrayTypeFunctionMapping), not just numpy.
+- Never call .compute() in a dask graph-construction probe.
+- For the hydro subpackage: audit one representative variant (d8) in detail.

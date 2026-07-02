@@ -1,5 +1,5 @@
 ---
-description: "Audit xrspatial modules for metadata propagation bugs: attrs, coords, dim names, dtype, nodata"
+description: "Audit xrspatial modules for metadata propagation bugs: attrs, coords, dim names, dtype, nodata -- verified by end-to-end execution, not source reading"
 globs: "*.py"
 ---
 
@@ -9,7 +9,7 @@ Audit xrspatial modules for metadata propagation bugs. Spatial libs lose CRS/tra
 
 ## Categories to audit
 
-1. **attrs preservation**: result DataArray having empty attrs when input had attrs, silently dropping res/crs/transform/nodatavals, reading attrs for math but not re-emitting on output, attrs propagated for eager path but lost on dask path.
+1. **attrs preservation**: result DataArray having empty attrs when input had attrs, silently dropping res/crs/transform/nodatavals, reading attrs for math but not re-emitting on output, inferred attrs overwriting user-provided values, attrs propagated for eager path but lost on dask path.
 
 2. **coords preservation**: result having integer-index coords when input had georeferenced coords, coordinate values stale by half-a-pixel after resampling, coord dtype changing silently, extra coords from input dropped on output.
 
@@ -22,13 +22,15 @@ Audit xrspatial modules for metadata propagation bugs. Spatial libs lose CRS/tra
 ## Process
 
 1. Read the module files, utils.py, and general_checks.py.
-2. Audit for the 5 categories. Only flag issues actually present.
-3. For each issue, assign severity and note exact file:line.
-4. If any CRITICAL, HIGH, or MEDIUM issue found, fix it end-to-end.
-5. Update the state CSV file.
+2. Execute, don't infer: for EVERY public function, build a tiny georeferenced input (real x/y coords, res/crs/transform/nodatavals/_FillValue attrs, an extra passthrough coord, non-default dim names) and run it end-to-end on the numpy AND dask+numpy backends. Cat 1-4 findings must come from an observed input-to-output discrepancy, not from reading the return statement. Extend to cupy/dask+cupy when CUDA is available.
+3. Audit for the 5 categories. Only flag issues actually observed.
+4. For each issue, assign severity and note exact file:line. The end-to-end scripts are the repro-gate evidence for CRITICAL/HIGH findings.
+5. If any CRITICAL, HIGH, or MEDIUM issue found, fix it end-to-end; verify every backend runnable on the host before opening a PR.
+6. Update the state CSV file.
 
 ## General rules
 
 - Only flag real metadata propagation issues.
-- Verify by reading the function end-to-end: does input attrs/coords/dims get propagated to returned DataArray?
+- Metadata behavior is observed, not read -- always run the function and inspect attrs/coords/dims/dtype of the returned object.
 - Check ALL backends, not just numpy.
+- A test may codify current behavior intentionally (e.g. an aggregation that genuinely drops a dim) -- check before flagging.

@@ -1,11 +1,11 @@
 ---
-description: "Audit xrspatial modules for test coverage gaps: missing backend coverage, missing edge cases, missing parameter coverage"
+description: "Audit xrspatial modules for test coverage gaps using measured branch coverage: missing backend coverage, missing edge cases, missing parameter coverage, metadata preservation tests"
 globs: "*.py"
 ---
 
 # Sweep Test Coverage: Backend and Edge-Case Test Coverage Audit
 
-Audit xrspatial modules for test coverage gaps. The fix for this sweep is adding tests, not changing source code.
+Audit xrspatial modules for test coverage gaps, starting from MEASURED branch coverage rather than a LOC-ratio proxy. The fix for this sweep is adding tests, not changing source code.
 
 ## Categories to audit
 
@@ -21,12 +21,17 @@ Audit xrspatial modules for test coverage gaps. The fix for this sweep is adding
 
 ## Process
 
-1. Read the module, its tests, general_checks.py, utils.py, and conftest.py.
-2. Build a mental matrix: for each public function, which backends and edge cases are tested?
+1. Measure branch coverage first -- it is the measured truth, the way flake8 output is for the style sweep:
+   ```
+   NUMBA_DISABLE_JIT=1 python -m pytest xrspatial/tests/test_<module>.py \
+       --cov=xrspatial.<module> --cov-branch --cov-report=json -q
+   ```
+   NUMBA_DISABLE_JIT=1 is required: coverage instrumentation clashes with numba under pytest-cov, and compiled kernel bodies are invisible to coverage. A test file that fails to run is itself a HIGH finding.
+2. Read the module, its tests, general_checks.py, utils.py, and conftest.py. Build a matrix: for each public function, which backends and edge cases are tested? Cross-check against the uncovered-line report.
 3. Audit for the 5 categories. Only flag gaps actually present.
-4. Assign severity for each gap.
-5. If any CRITICAL, HIGH, or MEDIUM gap found, add tests. The fix is test-only -- do not modify source.
-6. Update the state CSV file.
+4. Assign severity for each gap. Repro-gate evidence for CRITICAL/HIGH gaps: the coverage report lines, or a coverage before/after showing the new test exercises a previously-unexercised path.
+5. If any CRITICAL, HIGH, or MEDIUM gap found, add tests. The fix is test-only -- do not modify source. New cupy tests execute locally when CUDA is available; otherwise add them with the project's GPU-skip guard.
+6. Update the state CSV file, recording the measured branch_cov AFTER the added tests.
 
 ## General rules
 

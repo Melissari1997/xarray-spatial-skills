@@ -1,35 +1,35 @@
 ---
-description: "Audit xrspatial modules for API consistency issues: parameter naming drift, return shape drift, type hints, docstring divergence"
+description: "Audit xrspatial modules for API consistency issues: parameter naming drift, return shape drift, type hints, default value inconsistency, public API surface drift"
 globs: "*.py"
 ---
 
 # Sweep API Consistency: Parameter Naming and Signature Drift
 
-Audit xrspatial modules for API consistency issues across analogous public functions.
+Audit xrspatial modules for API consistency issues across analogous public functions, compared against a library-wide parameter inventory rather than a few anecdotal siblings.
 
 ## Categories to audit
 
-1. **Parameter naming drift**: same concept named differently across analogous functions (cellsize vs cell_size vs res, agg vs raster vs data, x vs xs vs x_coords, nodata vs _FillValue, cmap vs color_map, kernel vs weights).
+1. **Parameter naming drift**: same concept named differently across analogous functions (cellsize vs cell_size vs res, agg vs raster vs data, x vs xs vs x_coords, nodata vs _FillValue, cmap vs color_map, kernel vs weights), positional-vs-keyword convention drift.
 
 2. **Return shape drift**: analogous functions returning different types, tuple-return vs single-return drift, result coord/attr conventions differing, in-place vs returned-copy semantics drift.
 
 3. **Type hints and docstrings**: missing type hints on public functions while siblings have them, type hint/docstring disagreement, docstring listing parameters that don't exist or omitting ones that do, docstring style drift.
 
-4. **Default value inconsistency**: same parameter with different defaults in analogous functions, mutable default args, default None plus internal substitution where a literal default would be clearer.
+4. **Default value inconsistency**: same parameter with different defaults in analogous functions (check against the inventory's default column), mutable default args, default None plus internal substitution where a literal default would be clearer.
 
-5. **Public API surface drift**: function called by tests/notebooks but not in __all__, function in __all__ but undocumented, deprecated alias still exported with no DeprecationWarning, private-looking name referenced in tests as if public.
+5. **Public API surface drift**: function called by tests/notebooks but not in __all__ or xrspatial/__init__.py (orphan API), function in __all__ but undocumented, deprecated alias still exported with no DeprecationWarning, private-looking name referenced in tests as if public.
 
 ## Process
 
-1. Read the module files and 2-3 sibling modules for comparison.
-2. For each public function, build a table of (function name, signature, return type).
+1. Build a library-wide parameter inventory (path, function, param, annotation, default) via ast over all non-test xrspatial files; use it as the comparison baseline.
+2. Read the module files plus 2-3 sibling modules for return-shape and semantics comparisons.
 3. Audit for the 5 categories. Only flag issues actually present.
-4. Assign severity + file:line for each issue.
-5. If any CRITICAL, HIGH, or MEDIUM issue found, fix it. For parameter renames (breaking changes), add a deprecation shim.
+4. Assign severity + file:line. Repro gate for CRITICAL/HIGH: a short executed script demonstrating the user-facing surprise (same call pattern works on one sibling, TypeErrors on another).
+5. If any CRITICAL, HIGH, or MEDIUM issue found, fix it. For parameter renames (breaking changes), add a deprecation shim: accept both names, warn on the old one.
 6. Update the state CSV file.
 
 ## General rules
 
-- Only flag real consistency issues. Focus on user-facing surprise.
-- Compare against 2-3 sibling modules.
+- Only flag real consistency issues. Focus on user-facing surprise, not every minor naming difference.
+- If a rename is safe in one module but the inventory shows it breaks many others, note it instead of filing per-module issues.
 - Renames are breaking -- use deprecation shims, not hard renames.

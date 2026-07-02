@@ -9,60 +9,65 @@ and MEDIUM findings via rockout — but flag deprecation impact in the
 issue since renames are breaking changes.
 
 Optional arguments: {{ARGUMENTS}}
-(e.g. `--top 3`, `--exclude slope,aspect`, `--only-terrain`, `--reset-state`)
+(e.g. `--top 3`, `--exclude slope,aspect`, `--only-terrain`, `--reset-state`,
+`--no-fix`)
+
+**Read `.kilo/command/_sweep-common.md` first.** It defines module
+discovery, the standard flag set, module groups, the CUDA probe, the
+state-CSV contract, the severity rubric, the repro gate, and the agent
+contract. This file adds only what is specific to the API-consistency sweep.
 
 ---
 
-## Step 0 -- Detect CUDA availability
+## Step 0 -- Parse arguments and probe CUDA
 
-Before discovering modules, probe the host for CUDA:
+Parse the standard flags per _sweep-common.md (no extra flags for this
+sweep). Run the CUDA availability probe and capture `CUDA_AVAILABLE`.
 
-```bash
-python -c "from numba import cuda; print(cuda.is_available())" 2>/dev/null
+## Step 1 -- Discover modules, gather metadata, build the parameter inventory
+
+Discover modules per _sweep-common.md. Collect the common metadata fields
+(last_modified, total_commits, loc, public_funcs).
+
+Then build a library-wide parameter inventory ONCE in the parent, so every
+agent compares against the whole library instead of 2-3 anecdotal siblings:
+
+```python
+import ast, glob
+
+rows = []
+for path in glob.glob("xrspatial/**/*.py", recursive=True):
+    if "/tests/" in path or "__pycache__" in path:
+        continue
+    try:
+        tree = ast.parse(open(path).read())
+    except SyntaxError:
+        continue
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and not node.name.startswith("_"):
+            args = node.args
+            defaults = [None] * (len(args.args) - len(args.defaults)) + list(args.defaults)
+            for a, d in zip(args.args, defaults):
+                rows.append((path, node.name, a.arg,
+                             ast.unparse(a.annotation) if a.annotation else "",
+                             ast.unparse(d) if d is not None else ""))
+for r in rows:
+    print(",".join(r))
 ```
 
-Capture the result as `CUDA_AVAILABLE` (`true` if the command prints `True`,
-`false` otherwise — including import failure). Interpolate this flag into
-each subagent prompt below so the agent knows whether to run cupy and
-dask+cupy paths or limit itself to static review of the GPU code.
-
-## Step 1 -- Gather module metadata via git
-
-Enumerate candidate modules:
-
-**Single-file modules:** Every `.py` file directly under `xrspatial/`, excluding
-`__init__.py`, `_version.py`, `__main__.py`, `utils.py`, `accessor.py`,
-`preview.py`, `dataset_support.py`, `diagnostics.py`, `analytics.py`.
-
-**Subpackage modules:** `geotiff/`, `reproject/`, and `hydro/` directories under
-`xrspatial/`. Treat each as a single audit unit.
-
-For every module, collect:
-
-| Field | How |
-|-------|-----|
-| **last_modified** | `git log -1 --format=%aI -- <path>` |
-| **total_commits** | `git log --oneline -- <path> \| wc -l` |
-| **loc** | `wc -l < <path>` |
-| **public_funcs** | count of functions at module level (heuristic: `^def [a-z]`) |
-
-Store results in memory -- do NOT write intermediate files.
+Hold the output in memory (or the scratchpad) and paste the relevant slice —
+all rows whose parameter name or concept matches the audited module's
+parameters — into each agent prompt as `{param_inventory}`.
 
 ## Step 2 -- Load inspection state
 
-Read `.kilo/worktrees/sweep-api-consistency-state.csv`.
-
-If it does not exist, treat every module as never-inspected. If
-`{{ARGUMENTS}}` contains `--reset-state`, delete the file first.
-
-State file schema (one row per module):
+Read `.kilo/worktrees/sweep-api-consistency-state.csv` per the state-CSV contract
+in _sweep-common.md. Schema (one row per module):
 
 ```
 module,last_inspected,issue,severity_max,categories_found,notes
 slope,2026-05-01,1042,HIGH,1;3,"optional single-line notes"
 ```
-
-The file is registered with `merge=union` in `.gitattributes`.
 
 ## Step 3 -- Score each module
 
@@ -85,20 +90,22 @@ Rationale:
 
 ## Step 4 -- Apply filters from {{ARGUMENTS}}
 
-Same filter set as other sweeps: `--top N`, `--exclude`, `--only-terrain`,
-`--only-focal`, `--only-hydro`, `--only-io`, `--reset-state`.
+Apply the standard flags (`--top N` default 3, `--exclude`, `--only-<group>`,
+`--high-only`, `--reset-state`, `--include-experimental`) per
+_sweep-common.md.
 
 ## Step 5 -- Print the ranked table and launch subagents
 
 ### 5a. Print the ranked table
 
-Print a markdown table showing ALL scored modules sorted by score descending.
+Print a markdown table showing ALL scored modules sorted by score
+descending, with columns Rank, Module, Score, Last Inspected, Pub Funcs,
+Commits, LOC.
 
 ### 5b. Launch subagents for the top N modules
 
-For each of the top N modules (default 3), launch an Agent in parallel using
-`isolation: "worktree"` and `mode: "auto"`. All N agents must be dispatched
-in a single message so they run concurrently.
+Launch one Agent per selected module per the dispatch rules in
+_sweep-common.md (single message, `isolation: "worktree"`, `mode: "auto"`).
 
 Each agent's prompt must be self-contained:
 
@@ -112,12 +119,15 @@ Read these files: {module_files}
 Also read xrspatial/__init__.py to see what is publicly re-exported, and
 xrspatial/utils.py for shared helpers.
 
-For comparison, read 2-3 sibling modules (analogous functions). Examples:
-- For aspect: also read slope.py and curvature.py
-- For erosion: also read morphology.py
-- For glcm: also read focal.py and convolution.py
-The point is to compare parameter naming and return shapes against
-modules with similar function families.
+Library-wide parameter inventory (path, function, param, annotation,
+default) for every parameter name/concept this module uses — this is your
+comparison baseline, so drift findings are global, not anecdotal:
+
+{param_inventory}
+
+For return-shape and semantics comparisons, also read 2-3 sibling modules
+with analogous functions (e.g. for aspect: slope.py and curvature.py; for
+erosion: morphology.py; for glcm: focal.py and convolution.py).
 
 CUDA available on this host: {cuda_available}
 
@@ -126,14 +136,10 @@ If CUDA_AVAILABLE is true:
   and confirm they accept the same kwargs. Run a quick smoke test on a
   cupy DataArray for each public function so signature drift between
   numpy and cupy paths surfaces.
-- A rockout fix that touches public signatures must verify both numpy
-  and cupy entry points before opening the PR.
 
 If CUDA_AVAILABLE is false:
 - Inspect the cupy backend signatures by reading the source only.
-- Add the token `cuda-unavailable` to the `notes` column of the state
-  CSV so a future re-run on a GPU host knows to re-validate the cupy
-  signatures.
+- Add the token `cuda-unavailable` to the `notes` column of the state CSV.
 
 **Your task:**
 
@@ -145,7 +151,8 @@ If CUDA_AVAILABLE is false:
 
    **Cat 1 — Parameter naming drift**
    - HIGH: same concept named differently across analogous public
-     functions in this module or in sibling modules. Common offenders:
+     functions in this module or elsewhere in the inventory. Common
+     offenders:
      `cellsize` vs `cell_size` vs `res` vs `resolution`
      `agg` vs `raster` vs `data` vs `array`
      `x` vs `xs` vs `x_coords`
@@ -185,7 +192,7 @@ If CUDA_AVAILABLE is false:
    **Cat 4 — Default value inconsistency**
    - HIGH: same parameter has different defaults in analogous functions
      (e.g. `kernel_size=3` in one function, `kernel_size=5` in sibling,
-     no documented reason)
+     no documented reason) — check against the inventory's default column
    - MEDIUM: default uses a mutable type (`def f(x=[])`) — Python anti-pattern
    - MEDIUM: default `None` plus internal substitution where a literal
      default would be clearer and equally correct
@@ -204,64 +211,40 @@ If CUDA_AVAILABLE is false:
    Severity: HIGH for orphan APIs (users find them, depend on them, then
    break when they vanish)
 
-3. For each real issue, assign severity + file:line.
+3. For each real issue, assign severity per the rubric in _sweep-common.md
+   plus file:line. Apply the repro gate: for CRITICAL/HIGH findings, the
+   reproduction is a short script demonstrating the user-facing surprise
+   (e.g. the same call pattern working on one sibling and TypeError-ing on
+   another), executed on this host.
 
 4. If any CRITICAL, HIGH, or MEDIUM issue is found, run rockout to fix it.
    IMPORTANT: parameter renames are breaking changes — for HIGH
    parameter-rename fixes, the rockout PR must add a deprecation
    shim (accept both old and new names; emit DeprecationWarning on the
    old name; update docs). Document this in the issue body. For LOW
-   issues, document but do not fix.
+   issues, document but do not fix. Skip rockout entirely if the parent
+   sweep was run with --no-fix; record findings in the state notes instead.
 
-5. Update .kilo/worktrees/sweep-api-consistency-state.csv using csv.DictReader/Writer:
+5. After finishing (whether you found issues or not), update
+   .kilo/worktrees/sweep-api-consistency-state.csv following the state-CSV
+   contract in .kilo/command/_sweep-common.md (csv.DictReader/DictWriter
+   pattern, one line per record). Header:
 
-   ```python
-   import csv
-   from pathlib import Path
-
-   path = Path(".kilo/worktrees/sweep-api-consistency-state.csv")
-   header = ["module", "last_inspected", "issue", "severity_max",
-             "categories_found", "notes"]
-
-   rows = {}
-   if path.exists():
-       with path.open() as f:
-           for r in csv.DictReader(f):
-               rows[r["module"]] = r
-
-   rows["{module}"] = {
-       "module": "{module}",
-       "last_inspected": "<today's ISO date>",
-       "issue": "<issue number or empty>",
-       "severity_max": "<HIGH|MEDIUM|LOW or empty>",
-       "categories_found": "<semicolon-joined ints or empty>",
-       "notes": "<single-line notes or empty>",
-   }
-
-   def _oneline(v):
-       # merge=union is line-based: a newline inside a quoted field splits
-       # the record on parallel-agent merges. Force one physical line per
-       # record by collapsing embedded newlines to " | ".
-       return "" if v is None else str(v).replace("\r\n", " | ").replace("\r", " | ").replace("\n", " | ")
-
-   with path.open("w", newline="") as f:
-       w = csv.DictWriter(f, fieldnames=header, quoting=csv.QUOTE_MINIMAL)
-       w.writeheader()
-       for m in sorted(rows):
-           w.writerow({k: _oneline(v) for k, v in rows[m].items()})
-   ```
+   `module,last_inspected,issue,severity_max,categories_found,notes`
 
    Then `git add` and commit.
 
-Important:
-- Only flag real consistency issues. The lib has 40+ modules — do not
-  list every minor naming difference; focus on user-facing surprise.
-- Compare against 2-3 sibling modules. Cross-cutting concerns (e.g.
-  cellsize naming convention) often span the whole library; if a rename
-  is safe in one module but breaks 20 others, surface that as a notes
-  comment, do not file a per-module issue.
-- For the hydro subpackage: pick one variant (d8) and check whether
-  dinf/mfd siblings agree.
+Additional API-consistency-specific rules:
+- The lib has 40+ modules — do not list every minor naming difference;
+  focus on user-facing surprise.
+- Cross-cutting concerns (e.g. the cellsize naming convention) often span
+  the whole library; if a rename is safe in one module but the inventory
+  shows it breaks 20 others, surface that as a notes comment, do not file
+  a per-module issue.
+- Renames are breaking. The fix path is a deprecation shim, not a hard
+  rename, unless the function has a clearly orphan/private status.
+
+{agent contract from _sweep-common.md, verbatim}
 ```
 
 ### 5c. Print a status line
@@ -274,18 +257,5 @@ Launched {N} API consistency audit agents: {module1}, {module2}, {module3}
 
 ## Step 6 -- State updates
 
-To reset: `sweep-api-consistency --reset-state`
-
----
-
-## General Rules
-
-- Do NOT modify any source files directly. Subagents handle fixes.
-- Keep the output concise.
-- If {{ARGUMENTS}} is empty, use defaults: top 3, no category filter, no
-  exclusions.
-- State file (`.kilo/worktrees/sweep-api-consistency-state.csv`) is tracked in
-  git with `merge=union`.
-- Renames are breaking. The fix path is a deprecation shim, not a
-  hard rename, unless the function has a clearly orphan/private status.
-- False positives are worse than missed issues.
+State is updated by the subagents themselves (see agent prompt step 5).
+To reset all tracking: `sweep-api-consistency --reset-state`
