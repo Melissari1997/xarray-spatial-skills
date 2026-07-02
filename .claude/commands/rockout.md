@@ -165,35 +165,53 @@ Every rockout PR MUST receive a review posted to GitHub as a proper review
 (not a plain issue comment), regardless of how clean the change looks. The
 review is the audit trail.
 
-1. Invoke the `/review-pr` command against the PR number from Step 8:
+1. Record the current review count so posting can be verified afterwards:
+   ```bash
+   REVIEWS_BEFORE="$(gh pr view <PR_NUMBER> --json reviews \
+     -q '[.reviews[] | select(.state == "COMMENTED")] | length')"
    ```
-   /review-pr <PR_NUMBER>
+2. Invoke the `/review-pr` command against the PR number from Step 8,
+   passing `post` so the review is posted from inside the command, where
+   the body is still in context:
    ```
-2. Do not pass "post" -- keep `/review-pr` from posting on its own. Rockout
-   will post the review explicitly in step 5 below so it lands as a GitHub
-   review event, not a free-form comment.
+   /review-pr <PR_NUMBER> post
+   ```
+   `/review-pr` writes the humanized body to
+   `.claude/review-pr-<PR_NUMBER>-body.md` (resolved from the main
+   checkout), posts it as a review event of type `COMMENT` with
+   `gh pr review --comment --body-file`, and verifies it landed. Do NOT
+   invoke it without `post` and plan to "post later yourself" -- that
+   handoff is exactly how reviews end up generated but never posted.
 3. Capture the structured output. It will list findings grouped as:
    - **Blockers** -- must fix before merge
    - **Suggestions** -- should fix, not blocking
    - **Nits** -- optional improvements
+   If there are no findings at all, the review must still contain a short
+   "no issues found" body and still be posted -- every rockout PR carries
+   a visible review entry.
 4. Run this step regardless of CI status. Do not poll `gh pr checks` or
    wait for workflows to finish before invoking `/review-pr`.
-5. Post the captured review body to GitHub as a review event of type
-   `COMMENT` so it shows up under the PR's Reviews tab (not just the
-   Conversation tab). Use a heredoc to preserve formatting:
+5. HARD GATE -- independently verify the review is on GitHub before
+   moving to Step 10 (do not trust step 2's self-report):
    ```bash
-   gh pr review <PR_NUMBER> --comment --body "$(cat <<'EOF'
-   <humanized review body from /review-pr>
-   EOF
-   )"
+   REVIEWS_AFTER="$(gh pr view <PR_NUMBER> --json reviews \
+     -q '[.reviews[] | select(.state == "COMMENTED")] | length')"
    ```
+   - If `REVIEWS_AFTER > REVIEWS_BEFORE`, the trail exists -- proceed.
+     (If `/review-pr` reported falling back to `gh pr comment`, check
+     `gh pr view <PR_NUMBER> --json comments` instead.)
+   - If not, recover instead of proceeding:
+     a. If `.claude/review-pr-<PR_NUMBER>-body.md` exists, post it
+        yourself: `gh pr review <PR_NUMBER> --comment --body-file <file>`
+        (fall back to `gh pr comment --body-file` if the review event is
+        rejected), then re-run the verification.
+     b. If the body file is missing too, the review was lost -- re-run
+        `/review-pr <PR_NUMBER> post` and verify again.
    - Use `--comment`, never `--approve` or `--request-changes`. Rockout
      does not have authority to approve its own work or block it.
-   - If the review body is empty (no findings at all), still post a short
-     review of type `--comment` summarizing that no issues were found, so
-     every rockout PR has a visible review entry.
-   - Confirm via `gh pr view <PR_NUMBER> --json reviews` that a review of
-     state `COMMENTED` now exists on the PR before moving on.
+   - Step 10 MUST NOT start, and the rockout MUST NOT be summarized as
+     complete, while this verification fails. An unposted review is a
+     missing audit trail, not a cosmetic gap.
 
 ## Step 10 -- Follow Up on Review Findings
 
@@ -247,10 +265,11 @@ optional polish.
 3. After applying fixes:
    - Re-run the tests touched by the changes.
    - Push the new commits to the PR branch.
-4. Re-run `/review-pr <PR_NUMBER>` once after the follow-up commits, and
-   post the follow-up review the same way as step 9.5 above
-   (`gh pr review <PR_NUMBER> --comment --body ...`). Stop iterating once
-   only dismissed-with-reason items remain.
+4. Re-run `/review-pr <PR_NUMBER> post` once after the follow-up commits,
+   and apply the same Step 9.5 hard gate: record the COMMENTED-review
+   count before, confirm it increased after, and recover from the saved
+   body file (or by re-running) if it did not. Stop iterating once only
+   dismissed-with-reason items remain.
 5. Summarize the disposition of each original finding (fixed / deferred /
    dismissed, with the reason for dismissals or deferrals) in the final
    rockout summary so the trail is visible. If the fixed count is low
@@ -358,7 +377,16 @@ required check to green before declaring the rockout done.
 The rockout run is only complete when:
 - Every required CI check on the PR is green (or explicitly justified).
 - The PR reports `mergeable` with no conflicts against `main`.
-- The Step 9 / Step 10 review trail is posted.
+- The Step 9 / Step 10 review trail is posted -- re-verify it now as part
+  of declaring done, don't assume it from earlier steps:
+  ```bash
+  gh pr view <PR_NUMBER> --json reviews \
+    -q '[.reviews[] | select(.state == "COMMENTED")] | length'
+  ```
+  must be >= 1 (or the documented `gh pr comment` fallback must be
+  visible in `--json comments`). If it is 0, go back to Step 9.5's
+  recovery path before summarizing. Include the review URL(s) in the
+  final rockout summary.
 
 ---
 

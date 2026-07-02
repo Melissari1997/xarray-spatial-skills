@@ -65,11 +65,11 @@ Skip if no new functions were added and no backend support changed.
 
 ## Step 9 -- Run the PR Review
 
-Invoke the review-pr command. Post the review as a GitHub review event of type COMMENT.
+Record the PR's COMMENTED-review count, then invoke the review-pr command WITH `post` so the review is posted (as a GitHub review event of type COMMENT, via `--body-file`) from inside the command while the body is still in context -- never generate now and plan to post later. HARD GATE: independently verify the count increased before Step 10; if not, post the saved `review-pr-<PR>-body.md` file yourself, or re-run the review if the file is missing. An unposted review is a missing audit trail.
 
 ## Step 10 -- Follow Up on Review Findings
 
-Fix every Blocker, then work through Suggestions and Nits. Default to fixing. Group related fixes into focused commits.
+Fix every Blocker, then work through Suggestions and Nits. Default to fixing. Group related fixes into focused commits. Re-run review-pr with `post` after follow-up commits and apply the same verification gate.
 
 ## Step 11 -- Resolve Merge Conflicts With main
 

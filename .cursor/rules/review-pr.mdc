@@ -81,6 +81,15 @@ Format as structured output organized by severity:
 - What looks good
 - Checklist
 
+Persist the final body to a file (`review-pr-<PR>-body.md` in the tool state directory) BEFORE any posting attempt -- the body must never exist only in conversation context.
+
+## Step 8 -- Post
+
+- With `post`/`comment` in the arguments, or when running non-interactively (subagent, invoked from rockout or a sweep): post immediately -- never stop to ask a user who is not there; that is how reviews get silently dropped. With `no-post`: report the body-file path instead.
+- Post as a review event via `gh pr review <N> --comment --body-file <file>` (Reviews tab, never `--approve`/`--request-changes`; `--body-file`, never inline heredocs, which break on long markdown).
+- VERIFY it landed: the COMMENTED-review count from `gh pr view <N> --json reviews` must increase. If the review event is rejected, fall back to `gh pr comment --body-file` and verify via `--json comments`. If both fail, stop and report the error plus the body-file path.
+- Delete the body file only after verified posting.
+
 ## General rules
 
 - Be specific. Every finding must include a file path and line number.

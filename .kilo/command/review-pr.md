@@ -29,8 +29,8 @@ actual PR state, not whatever happens to be checked out in the
 main directory.
 
 First, detect whether we are already inside a worktree on the PR's
-head branch (this is the common case when `/review-pr` is invoked
-from `/rockout` Step 9):
+head branch (this is the common case when `review-pr` is invoked
+from `rockout` Step 9):
 
 ```bash
 REVIEW_PR_NUM=<number>
@@ -221,14 +221,67 @@ Organize findings by severity:
 After generating the review, run it through [TOOL: humanize] before
 showing it to the user or posting it to GitHub.
 
-## Step 8 -- Post (if requested)
+Then persist the final humanized body to a file BEFORE any posting attempt.
+The body must never exist only in conversation context -- if posting is
+deferred, interrupted, or handed to a caller, the file is what survives:
 
-If {{ARGUMENTS}} includes "post" or "comment":
-1. Post the review as a PR comment using `gh pr comment <number> --body "..."`.
-2. Confirm the comment was posted successfully.
+```bash
+REVIEW_BODY_ROOT="$(git rev-parse --path-format=absolute --git-common-dir)"
+REVIEW_BODY_ROOT="${REVIEW_BODY_ROOT%/.git}"
+REVIEW_BODY_FILE="$REVIEW_BODY_ROOT/.kilo/worktrees/review-pr-$REVIEW_PR_NUM-body.md"
+```
 
-If {{ARGUMENTS}} does not include "post", show the review to the user and ask
-whether they want it posted.
+Write the review body to `$REVIEW_BODY_FILE` with the Write tool (the
+`--git-common-dir` resolution makes the path stable even when running
+inside a worktree). Print the path so any caller can find it.
+
+## Step 8 -- Post
+
+Decide the posting mode:
+
+- **{{ARGUMENTS}} includes `no-post`:** do not post. Report the review and
+  the `$REVIEW_BODY_FILE` path so the caller can post it; keep the file.
+- **{{ARGUMENTS}} includes `post` or `comment`, OR there is no interactive
+  user** (you are a subagent, or this command was invoked from another
+  command such as rockout or a sweep): post NOW, without asking anyone.
+  There is nobody to ask in an automated context -- stopping to ask is how
+  reviews get silently dropped.
+- **Interactive session without `post`:** show the review and ask the user
+  whether to post. If they decline, keep `$REVIEW_BODY_FILE` and tell them
+  where it is.
+
+To post, submit a GitHub review event (Reviews tab), not a plain issue
+comment, and always use `--body-file` -- inline heredoc bodies break on
+long markdown with backticks and are the other way reviews get lost:
+
+```bash
+gh pr review "$REVIEW_PR_NUM" --comment --body-file "$REVIEW_BODY_FILE"
+```
+
+Never use `--approve` or `--request-changes`.
+
+Then VERIFY the review actually landed -- posting is not done until this
+returns the marker:
+
+```bash
+gh pr view "$REVIEW_PR_NUM" --json reviews \
+  -q '[.reviews[] | select(.state == "COMMENTED")] | length'
+```
+
+The count must have increased (and the newest review body should start
+with `## PR Review`). If the `gh pr review` call failed (e.g. the token
+cannot review its own PR -- GitHub forbids self-review for some token
+types), fall back to:
+
+```bash
+gh pr comment "$REVIEW_PR_NUM" --body-file "$REVIEW_BODY_FILE"
+```
+
+and verify with `gh pr view --json comments` instead, noting the fallback
+in your output. If both attempts fail, STOP and report the error and the
+`$REVIEW_BODY_FILE` path -- do not swallow the failure and continue.
+
+Only after verified posting, delete `$REVIEW_BODY_FILE`.
 
 ---
 
